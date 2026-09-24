@@ -1,0 +1,27 @@
+{
+  "model_path": "models/vosk-model-small-pt-0.3",
+  "commands": [
+    "pular",
+    "pula"
+  ],
+  "sample_rate": 16000,
+  "block_size": 2000,
+  "input_device": null,
+  "cooldown_seconds": 2.0,
+  "action_mode": "click",
+  "click": {
+    "x": 1361,
+    "y": 808,
+    "restore_mouse": true
+  },
+  "keys": [
+    [
+      "tab"
+    ],
+    [
+      "enter"
+    ]
+  ],
+  "failsafe": false,
+  "verbose_partials": false
+}

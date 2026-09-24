@@ -1,0 +1,10 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Modelo do Vosk (~40 MB) - baixado com download_model.py
+models/
+*.zip
+
+.DS_Store

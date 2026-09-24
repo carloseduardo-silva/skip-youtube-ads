@@ -1,0 +1,9 @@
+# Reconhecimento de voz offline (modelo local, sem rede)
+vosk==0.3.44
+
+# Captura de audio. As wheels ja trazem o PortAudio embutido,
+# entao nao e preciso instalar portaudio pelo Homebrew.
+sounddevice==0.4.6
+
+# Automacao de teclado/mouse. No macOS puxa pyobjc-core e pyobjc-framework-Quartz.
+pyautogui==0.9.54
