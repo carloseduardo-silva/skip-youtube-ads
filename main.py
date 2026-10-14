@@ -124,12 +124,16 @@ class ConfigError(Exception):
 @dataclass
 class Config:
     model_path: str = "models/vosk-model-small-pt-0.3"
-    # "skip" nao existe no vocabulario do modelo de portugues (veja o README).
-    commands: List[str] = field(default_factory=lambda: ["pular", "pula"])
+    # Frase de duas palavras de proposito: gatilho de uma palavra so dispara
+    # sozinho com o audio do proprio video (veja o README).
+    commands: List[str] = field(default_factory=lambda: ["pular anúncio"])
     sample_rate: int = 16000
     block_size: int = 2000
     input_device: Optional[Union[int, str]] = None
     cooldown_seconds: float = 2.0
+    # Blocos seguidos em que a frase precisa aparecer antes de agir. Cada um
+    # custa ~125 ms e protege contra o parcial instavel do reconhecedor.
+    confirmations: int = 2
     action_mode: str = "click"
     click: Dict[str, Any] = field(
         default_factory=lambda: {"x": 0, "y": 0, "restore_mouse": True}
@@ -336,14 +340,31 @@ class AudioSource:
 # --------------------------------------------------------------------------- #
 
 class CommandRecognizer:
-    """Vosk com gramatica fechada nos comandos-alvo.
+    """Vosk com gramatica fechada, montada para nao disparar por engano.
 
-    Restringir o vocabulario deixa o decoder mais rapido e derruba o
-    falso-positivo: qualquer outra fala cai em "[unk]".
+    A gramatica tem tres camadas, e cada uma existe por um motivo medido:
+
+    1. Os comandos (ex.: "pular anuncio") - o que dispara a acao.
+    2. As palavras soltas dos comandos + palavras-funcao comuns ("escapes").
+       Sem elas o decoder nao tem outro caminho e colapsa qualquer fala
+       parecida no comando: falar so "pular" ou "pular esse anuncio" viraria
+       "pular anuncio" e clicaria sozinho.
+    3. "[unk]", que absorve o resto.
     """
 
+    # Palavras-funcao mais comuns do portugues. Servem de escape para o
+    # decoder encaixar fala que nao e o gatilho.
+    _ESCAPES = (
+        "o", "a", "os", "as", "um", "uma", "de", "do", "da", "dos", "das",
+        "em", "no", "na", "para", "pra", "por", "com", "que", "se", "e", "é",
+        "não", "sim", "esse", "essa", "este", "esta", "isso", "ele", "ela",
+        "eu", "você", "vai", "vou", "ver", "mais", "muito", "agora", "aqui",
+        "vídeo", "parte", "bom", "dá", "ao", "mesmo", "longo",
+    )
+
     def __init__(self, vosk_mod, model_path: str, sample_rate: int,
-                 commands: List[str], verbose_partials: bool = False):
+                 commands: List[str], verbose_partials: bool = False,
+                 confirmations: int = 2):
         vosk_mod.SetLogLevel(0 if verbose_partials else -1)
 
         try:
@@ -356,11 +377,30 @@ class CommandRecognizer:
 
         commands = self._filter_by_vocabulary(model, commands)
 
-        grammar = json.dumps(list(commands) + ["[unk]"], ensure_ascii=False)
+        grammar = json.dumps(self._build_grammar(model, commands),
+                             ensure_ascii=False)
         self._rec = vosk_mod.KaldiRecognizer(model, sample_rate, grammar)
         self._commands = list(commands)
         self._verbose = verbose_partials
+        self._confirmations = max(1, int(confirmations))
         self._last_partial = ""
+        self._streak = 0
+
+    @classmethod
+    def _build_grammar(cls, model, commands: List[str]) -> List[str]:
+        """Comandos + escapes + [unk], sem duplicatas e so com o que o modelo conhece."""
+        entradas = list(commands)
+        for cmd in commands:                     # palavras soltas do comando
+            entradas.extend(cmd.split())
+        entradas.extend(cls._ESCAPES)
+
+        vistos, saida = set(commands), list(commands)
+        for palavra in entradas[len(commands):]:
+            if palavra in vistos or model.vosk_model_find_word(palavra) < 0:
+                continue
+            vistos.add(palavra)
+            saida.append(palavra)
+        return saida + ["[unk]"]
 
     @staticmethod
     def _filter_by_vocabulary(model, commands: List[str]) -> List[str]:
@@ -409,23 +449,36 @@ class CommandRecognizer:
     def feed(self, block: bytes) -> Optional[str]:
         """Consome um bloco e devolve o comando reconhecido, se houver.
 
-        Le tambem o resultado parcial: esperar o fim do enunciado custaria
-        centenas de milissegundos, que e justamente o que queremos evitar.
+        Casa no resultado parcial, para responder junto com o fim da palavra.
+        O parcial e instavel - chega a exibir a frase-alvo no meio de outra
+        fala e so depois se corrigir - entao exigimos que ele se repita por
+        alguns blocos seguidos antes de agir. Cada confirmacao custa um bloco
+        (~125 ms); o resultado final, quando chega, vale por si so.
         """
         if self._rec.AcceptWaveform(block):
             text = json.loads(self._rec.Result()).get("text", "")
+            final = True
             self._last_partial = ""
         else:
             text = json.loads(self._rec.PartialResult()).get("partial", "")
+            final = False
             if self._verbose and text and text != self._last_partial:
                 log.debug("parcial: %s", text)
                 self._last_partial = text
 
         command = self._match(text)
-        if command:
-            # Zera o estado para o mesmo trecho de fala nao disparar de novo.
-            self._rec.Reset()
-            self._last_partial = ""
+        if not command:
+            self._streak = 0
+            return None
+
+        self._streak += 1
+        if not final and self._streak < self._confirmations:
+            return None
+
+        # Zera o estado para o mesmo trecho de fala nao disparar de novo.
+        self._rec.Reset()
+        self._streak = 0
+        self._last_partial = ""
         return command
 
 
@@ -590,7 +643,8 @@ def test_action(cfg: Config, pyautogui_mod, accessible: Optional[bool]) -> int:
 
 def run(cfg: Config, sd, vosk_mod, pyautogui_mod) -> int:
     recognizer = CommandRecognizer(
-        vosk_mod, cfg.model_path, cfg.sample_rate, cfg.commands, cfg.verbose_partials
+        vosk_mod, cfg.model_path, cfg.sample_rate, cfg.commands,
+        cfg.verbose_partials, cfg.confirmations,
     )
     actuator = Actuator(pyautogui_mod, cfg)
 

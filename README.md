@@ -1,6 +1,6 @@
 # skip-youtube-ads
 
-Pule os anúncios do YouTube falando **"pular"**. Roda 100% offline no macOS: o
+Pule os anúncios do YouTube falando **"pular anúncio"**. Roda 100% offline no macOS: o
 reconhecimento de voz acontece localmente com [Vosk](https://alphacephei.com/vosk/),
 sem nenhuma requisição de rede no caminho do comando.
 
@@ -93,13 +93,13 @@ source venv/bin/activate
 python main.py
 ```
 
-Fale **"pular"** (ou "pula"/"skip") e o botão é acionado.
+Fale **"pular anúncio"** e o botão é acionado.
 
 ```
 21:04:12.331  Microfone: Microfone (MacBook Air)
-21:04:12.331  Acao: click | comandos: pular, pula
+21:04:12.331  Acao: click | comandos: pular anúncio
 21:04:12.332  Ouvindo... (Ctrl+C para sair)
-21:04:19.884  comando 'pular' -> acao disparada (click)
+21:04:19.884  comando 'pular anúncio' -> acao disparada (click)
 ```
 
 Outros comandos:
@@ -118,7 +118,8 @@ python main.py --config outro.json
 | Chave | Descrição |
 |---|---|
 | `model_path` | pasta do modelo Vosk |
-| `commands` | palavras que disparam a ação. Palavras fora do vocabulário do modelo são descartadas na partida, com aviso |
+| `commands` | frases que disparam a ação. Use **duas palavras** (veja abaixo). Palavras fora do vocabulário do modelo são descartadas na partida, com aviso |
+| `confirmations` | blocos seguidos em que a frase precisa aparecer antes de agir. Cada um custa ~125 ms |
 | `sample_rate` | 16000 é o nativo do modelo; mude só se o device não aceitar |
 | `block_size` | amostras por bloco. 2000 = 125 ms. Menor = mais rápido, porém menos preciso |
 | `input_device` | `null` = padrão do sistema; ou índice/nome de `--list-devices` |
@@ -146,15 +147,44 @@ janela muda de tamanho.
 
 ## Como a latência é mantida baixa
 
-- **Gramática fechada.** O reconhecedor só conhece as palavras de `commands` e
-  `[unk]`. Vocabulário mínimo = decodificação mais rápida e quase nenhum
-  falso-positivo com conversa normal.
-- **Disparo no parcial.** A ação sai assim que a palavra aparece no resultado
-  *parcial* do Vosk, sem esperar o fim do enunciado (o que custaria centenas de ms).
+- **Gramática fechada, com escapes.** O reconhecedor conhece a frase-alvo, as
+  palavras dela soltas, uma lista de palavras-função comuns e `[unk]`.
+  Vocabulário mínimo = decodificação rápida; os escapes evitam o falso-positivo
+  (veja a seção seguinte).
+- **Disparo no parcial.** A ação sai assim que a frase aparece no resultado
+  *parcial* do Vosk, sem esperar o fim do enunciado. Esperar o resultado final
+  custaria **+1,2 s** — medido: o Vosk só fecha o enunciado após ~1,5 s de
+  silêncio, que com o vídeo tocando pode nem existir.
 - **Callback só enfileira.** A thread de tempo real do PortAudio apenas empilha
   bytes; o Vosk roda na thread principal. Se o consumo atrasar, blocos antigos
   são descartados em vez de acumular.
 - **`pyautogui.PAUSE = 0`.** Remove a pausa padrão de 100 ms entre ações.
+
+---
+
+## Por que o gatilho tem duas palavras
+
+Um gatilho de uma palavra só ("pular") **dispara sozinho com o áudio do próprio
+vídeo**. Medido com frases sintetizadas: `"vou pular essa parte do vídeo agora"`
+acionava o clique.
+
+Duas palavras ajudam, mas sozinhas não bastam — e o motivo é sutil. Com uma
+gramática fechada contendo só a frase-alvo, o decoder não tem outro caminho: ao
+ouvir "pular" ele **completa otimisticamente** para "pular anúncio" e clica. Por
+isso a gramática inclui três camadas:
+
+1. a frase-alvo (`commands`);
+2. as palavras dela soltas **mais uma lista de palavras-função comuns** — os
+   "escapes", onde o decoder encaixa fala que não é o gatilho;
+3. `[unk]`, para o resto.
+
+Com os escapes, `"não dá pra pular esse anúncio agora"` é transcrito como ele
+mesmo em vez de colapsar em "pular anúncio". Resultado medido em 8 amostras
+(2 que devem disparar, 6 que não): **8/8**, com a ação saindo praticamente junto
+com o fim da fala.
+
+Se você trocar a frase, mantenha duas palavras e prefira uma combinação que não
+apareça naturalmente na fala do vídeo.
 
 ---
 
@@ -179,12 +209,12 @@ O botão "Pular anúncios" muda de posição conforme o tamanho da janela. Recal
 com `get_coords.py` ou mantenha a janela num tamanho fixo (tela cheia ajuda).
 
 **Dispara sozinho**
-Aumente `cooldown_seconds` e reduza `commands` — palavras curtas como "pula"
-casam com mais coisa. Deixar só `["pular"]` é o mais conservador.
+Aumente `confirmations` para 3 ou 4 (custa ~125 ms cada) e `cooldown_seconds`.
+Não troque a frase por uma palavra só: veja a seção sobre o gatilho.
 
 **"skip" nunca funciona**
 O `vosk-model-small-pt-0.3` não tem "skip" no vocabulário — palavra que o modelo
-não conhece nunca é reconhecida. Por isso o default vem só com `["pular", "pula"]`.
+não conhece nunca é reconhecida. Por isso o default é `["pular anúncio"]`.
 Se você colocar uma palavra desconhecida no `config.json`, ela é descartada na
 partida com um aviso:
 
@@ -192,7 +222,8 @@ partida com um aviso:
 ignorando palavra(s) fora do vocabulario do modelo: 'skip' (...)
 ```
 
-Qualquer palavra do português serve como gatilho (`"próximo"`, `"anúncio"`, etc.).
+Qualquer palavra do português serve como gatilho — mas leia a seção abaixo antes
+de escolher.
 
 ---
 
